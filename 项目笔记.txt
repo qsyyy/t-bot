@@ -1,132 +1,386 @@
-#安装git后需要进行第一次设置。
-git config --global user.name "qsyyy"
-git config --global user.email "xu96078@gmail.com"
+import os
+import re
+import time
+import sqlite3
+import logging
+import secrets
+import requests
+import hashlib
+import base64
+from datetime import datetime, timezone, timedelta
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    filters,
+    CallbackContext
+)
+from telegram.helpers import escape_markdown
+import tweepy
+from dotenv import load_dotenv
+from requests_oauthlib import OAuth2Session
 
-#然后配置ssh
-ssh-keygen -t rsa -b 4096 -C "your_email@example.com" #直接回车3次默认设置即可
+# 加载环境变量
+load_dotenv()
 
-#然后去默认保存路径为~/.ssh/id_rsa.pub 复制公钥粘贴到github上。
+# 初始化数据库
+conn = sqlite3.connect('tweets_cache.db')
+TWITTER_UID = "887176491200466944"
+
+def init_db():
+    cursor = conn.cursor()
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS twitter_auth (
+        user_id TEXT PRIMARY KEY,
+        access_token TEXT,
+        refresh_token TEXT,
+        expires_at INTEGER
+    )''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS processed_tweets (
+        tweet_id TEXT PRIMARY KEY
+    )''')
+    conn.commit()
+
+class TwitterAuthManager:
+    def __init__(self):
+        self.client_id = os.getenv("TWITTER_CLIENT_ID")
+        self.client_secret = os.getenv("TWITTER_CLIENT_SECRET")
+        self.redirect_uri = "http://localhost:3000/callback"
+        self.scope = ["tweet.read", "users.read", "offline.access"]
+
+    def _basic_auth(self):
+        """生成Basic认证头"""
+        auth_string = f"{self.client_id}:{self.client_secret}"
+        return base64.b64encode(auth_string.encode()).decode()
+
+    def get_oauth_session(self):
+        return OAuth2Session(
+            self.client_id,
+            redirect_uri=self.redirect_uri,
+            scope=self.scope
+        )
+
+    def generate_auth_url(self):
+        """生成Twitter认证链接"""
+        oauth = self.get_oauth_session()
+        code_verifier = secrets.token_urlsafe(50)
+        code_challenge = self.get_code_challenge(code_verifier)
+        auth_url = oauth.authorization_url(
+            "https://twitter.com/i/oauth2/authorize",
+            code_challenge=code_challenge,
+            code_challenge_method="S256"
+        )
+        return auth_url[0], code_verifier
+
+
+    def get_code_challenge(self, code_verifier):
+
+        code_verifier_bytes = code_verifier.encode('utf-8')
+        sha256_hash = hashlib.sha256(code_verifier_bytes).digest()
+        return base64.urlsafe_b64encode(sha256_hash).decode('utf-8').replace('=', '')
+
+
+    def save_tokens(self, token):
+        """保存令牌到数据库"""
+        cursor = conn.cursor()
+        cursor.execute('''INSERT OR REPLACE INTO twitter_auth 
+            (user_id, access_token, refresh_token, expires_at)
+            VALUES (?, ?, ?, ?)''',
+            (TWITTER_UID, 
+             token['access_token'],
+             token['refresh_token'],
+             int(time.time()) + token['expires_in'])
+        )
+        conn.commit()
+
+    def get_valid_client(self):
+        """获取有效客户端并自动刷新令牌"""
+        cursor = conn.cursor()
+        cursor.execute('SELECT access_token, refresh_token, expires_at FROM twitter_auth')
+        row = cursor.fetchone()
+
+        if not row:
+            raise Exception("未找到有效认证信息，请先运行/auth命令认证")
+
+        access_token, refresh_token, expires_at = row
+
+
+        if time.time() > expires_at - 60:
+            token = requests.post(
+                "https://api.twitter.com/2/oauth2/token",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": f"Basic {self._basic_auth()}"
+                },
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token
+                }
+            ).json()
+
+            self.save_tokens(token)
+            access_token = token['access_token']
+
+        return tweepy.Client(
+            access_token,
+            wait_on_rate_limit=True
+        )
+
+# 初始化认证管理器和数据库
+auth_manager = TwitterAuthManager()
+init_db()
+
+# 日志配置
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class RateLimiter:
+    def __init__(self):
+        self.last_call = None
+        self.interval = 4
+        self.daily_limit = 1
+        self.last_manual_run = None
+
+    def wait(self):
+        if self.last_call and (time.time() - self.last_call < self.interval):
+            time.sleep(self.interval - (time.time() - self.last_call))
+        self.last_call = time.time()
+
+    def can_manual_run(self):
+        if not self.last_manual_run:
+            return True
+        return (datetime.now() - self.last_manual_run).total_seconds() >= 86400
+
+limiter = RateLimiter()
+
+async def fetch_and_send_likes(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        limiter.wait()
+        client = auth_manager.get_valid_client()
+
+
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM config WHERE key = "last_processed_id"')
+        row = cursor.fetchone()
+        last_id = row[0] if row else None
+
+
+        response = client.get_liked_tweets(
+            TWITTER_UID,
+            max_results=25,  # 测试阶段设为25
+            expansions=["author_id", "attachments.media_keys"],
+            tweet_fields=["created_at", "text"],
+            user_fields=["name", "username"],
+            media_fields=["url", "type", "variants"]
+        )
+
+        if not response.data:
+            return
+
+        new_tweets = []
+        current_max_id = response.data[0].id
+        for tweet in response.data:
+            if tweet.id == last_id:
+                break
+            cursor.execute('SELECT 1 FROM processed_tweets WHERE tweet_id = ?', (tweet.id,))
+            if not cursor.fetchone():
+                new_tweets.append(tweet)
+
+        if not new_tweets:
+            return
+
+
+        for tweet in reversed(new_tweets):
+            await process_single_tweet(tweet, response.includes, context)
+            cursor.execute('INSERT OR IGNORE INTO processed_tweets (tweet_id) VALUES (?)', (tweet.id,))
+
+
+        cursor.execute('INSERT OR REPLACE INTO config (key, value) VALUES ("last_processed_id", ?)', (current_max_id,))
+        conn.commit()
+
+    except Exception as e:
+        logger.error(f"获取点赞失败: {str(e)}", exc_info=True)
+        await send_error(context, f"❌ 获取点赞失败：{str(e)}")
+
+async def process_single_tweet(tweet, includes, context):
+    try:
+        author = next(u for u in includes['users'] if u.id == tweet.author_id)
+        author_name = escape_markdown(author.name, version=2)
+        author_link = f"[{author_name}](https://twitter.com/{author.username})"
+
+        media_urls = []
+        if 'media' in includes:
+            media_list = [m for m in includes['media'] if m.media_key in tweet.attachments['media_keys']]
+            for media in media_list:
+                if media.type == 'photo':
+                    media_urls.append({'type': 'photo', 'url': media.url})
+                elif media.type in ['video', 'animated_gif']:
+                    variants = sorted(
+                        [v for v in media.variants if 'bit_rate' in v],
+                        key=lambda x: x.get('bit_rate', 0),
+                        reverse=True
+                    )
+                    if variants:
+                        media_urls.append({'type': 'video', 'url': variants[0]['url']})
+
+        text = re.sub(r'https://t\.co/\w+', '', tweet.text).strip()
+        text = escape_markdown(text, version=2)
+
+        caption = (
+            f"{author_link}:\n"
+            f"{text}\n\n"
+            f"🔗 [来源](https://twitter.com/{author.username}/status/{tweet.id})"
+        )
+
+        if media_urls:
+            media_group = []
+            for idx, media_info in enumerate(media_urls[:4]):
+                media_class = InputMediaPhoto if media_info['type'] == 'photo' else InputMediaVideo
+                media = media_class(
+                    media=media_info['url'],
+                    caption=caption if idx == 0 else None,
+                    parse_mode='MarkdownV2'
+                )
+                media_group.append(media)
+
+            await context.bot.send_media_group(
+                chat_id=os.getenv("TELEGRAM_CHANNEL_ID"),
+                media=media_group
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=os.getenv("TELEGRAM_CHANNEL_ID"),
+                text=caption,
+                parse_mode='MarkdownV2'
+            )
+
+    except Exception as e:
+        logger.error(f"处理推文失败: {str(e)}", exc_info=True)
+        await send_error(context, f"❌ 处理推文失败：{str(e)}")
+
+async def send_error(context, message):
+    await context.bot.send_message(
+        chat_id=os.getenv("TELEGRAM_CHANNEL_ID"),
+        text=escape_markdown(message, version=2),
+        parse_mode='MarkdownV2'
+    )
+
+async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post or update.message
+    if not message:
+
+        return
+
+    if not limiter.can_manual_run():
+        msg = await context.bot.send_message(
+            chat_id=message.chat.id,
+            text="⚠️ 24小时内只能手动触发一次"
+        )
+        context.job_queue.run_once(delete_message, 5, data=msg.message_id)
+        return
+
+    try:
+        limiter.last_manual_run = datetime.now()
+        await context.bot.delete_message(
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
+        await fetch_and_send_likes(context)
+    except Exception as e:
+        logger.error(f"手动触发失败: {str(e)}")
+        await send_error(context, f"❌ 手动触发失败：{str(e)}")
+
+async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    auth_url, code_verifier = auth_manager.generate_auth_url()
+    context.user_data['code_verifier'] = code_verifier
+    await update.message.reply_text(
+        f"请访问以下链接完成Twitter认证：\n{auth_url}\n"
+        "认证完成后，请将回调URL中的code参数发送给我（格式：/callback <code>）"
+    )
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    code = update.message.text.split()[-1]
+    code_verifier = context.user_data.get('code_verifier')
+
+    try:
 
 
 
-#创建本地项目  ：先进目录，然后
-	git init
-	
-	
-	#创建git库，命名为t-bot
-	
-	#需要注意的是本地创建的分支名称一般是master，但是远程是main所以需要先更改本地分支。
-	git branch -M main #修改本地分支名称
 
 
-	
-	
-	git remote add origin git@github.com:qsyyy/t-bot.git #关联远程仓库
-	
-	git add .  #添加进暂存区
-	
-	git commit -m "Initial commit" #提交更改到本地仓房中。
-	
-	
-	git push -u origin main  #d第一次push时使用-u命令绑定到main分支，推送代码到main分支上
-	
-	git push #第二次直接push就行。
-	
-	{
-	第一次从远程拉取仓库：
-	如果分支是main，项目是t-bot
-	首先要激活仓库
-	选择一个目录，
-	git init
-	然后关联仓库 
-	git remote add origin git@github.com:qsyyy/t-bot.git
-	
-	然后修改分支名！
-	git branch -M main #修改本地分支名称
-	if {本地已有旧版未提交的文件}
-		git reset --hard origin/main #丢弃本地修改
-		git clean -fd  # 删除未跟踪的文件和目录
-		
-		else if {保留更改}
-				git stash        # 暂存本地修改
-				git pull origin main
-				git stash pop    # 恢复暂存的修改（可能需要解决冲突）
-		else if 
-				git pull origin main
-				
-	以后直接git pull就行
 
-	}
-	
-	
-	bot修改的思路：15分钟一次的cd，
-	
-	相关信息：免费版推特api，每月限额100次请求。每次请求都有15分钟的冷却时间。
 
-我在修改我的代码，把本来用于telegram频道中接受推特链接并格式化输出推文内容的bot修改成拉取我的推特点赞的推文，并格式化后发送到频道中。这是我整理出来的功能需求。我需要你帮忙修改代码。而且由于我本身并不会编程，所以如果有需要修改的地方请给出详细的代码位置，并用修改前后的代码互相对照。若需要修改很多代码。请直接输出修改后的完整代码。如果一次输出写不完就结束了，请在下一个回复中说明后继续编写代码
+        token = auth_manager.get_oauth_session().fetch_token(
+            "https://api.twitter.com/2/oauth2/token",
+            code=code,
+            code_verifier=code_verifier,
+            client_id=auth_manager.client_id,
+            client_secret=auth_manager.client_secret,
 
-目前的环境：anaconda  python version : 3.12.7
-环境中的依赖：python-telegram-bot==20.3
-tweepy==4.14.0
-python-dotenv==1.0.0
 
-我已经获取了TELEGRAM_TOKEN
-TWITTER_BEARER_TOKEN
-TWITTER_API_KEY
-TWITTER_API_SECRET
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Basic {auth_manager._basic_auth()}"
+            }
+        )
 
-我的推特uid=887176491200466944
-	
-需求：
 
-bot的触发方式：调整成每日固定a.m.6:00和p.m.10:00各运行一次，
-	另设在telegram频道中收到指定命令/updata时触发运行。且在触发运行后将频道中的启动指令那条消息删除。
-	
-	
-bot的功能：
-	1.拉取指定用户的点赞列表。数量为100。
-	2.由于liked_tweets端点，返回的推文默认是按用户点赞的时间倒序排列，且不支持查看具体的点赞时间。
-	建立环境变量new_likes_id保存拉取的点赞列表最上端的推文id，
-	每次运行后拉取的点赞数据与上一次的记录互相比较。找出新增的点赞。然后把此次最新的点赞推文id更新到new_likes_id。
-	
-	3.需要获取的内容有？用户昵称，用户主页url，推文，图片，媒体，gif。
-	获取到媒体后，筛出最高比特率的视频url。存到对应的表中。我记得gif在推特上也是mp4格式的，就按视频一样处理吧。
-	
-	4.根据获取到的新增推文构造telegram消息。将每条推特都通过telegram bot的api发送到频道中。
-	
-	5.构造telegram消息的要求：
-		5.1 一般来说推文附带的媒体不会超过4张图片或者视频。所以我们可以直接把推文附带的图片和视频跟推文打包在一起发送。
-		5.2 所有推文都单独发送
-		5.3 构造的格式。  1）媒体在消息的上方。
-		2）下面第一行的文字是推文发送者的昵称。该昵称附上发送者的主页url，点击可以跳转。昵称后面加个冒号。
-		3）另起一行是正文文本。
-		4）再另起一行将推文的url放在这里。
-	
-	6.由于推特的免费api的请求数极少。所以给bot的运行也设置冷却时间，防止误启动。每天只允许一次手动运行。保证请求次数不超过一百次/月
-	7.还需要有报错代码。
-	
-	
-	
-	
-	#
-	3.
-	或者我直接在tg上输入指令运行bot拉取推特的点赞列表。
-	将点赞列表格式化按推文输出在频道里。
-	需要注意的有怎么保证只有我一个能使用bot？怎么保证每天的点赞不会被漏掉？
-	可以查阅推特api的开发笔记。
-	发送消息的模块可以服用现在的部分。
-	
-	参考：现有的代码块
-	
-	
-	算法设计：
-	
-	
-	
-	优化：
-	要不要优化算法结构？'
-	
-	
-	
-文档：点赞api需求 OAuth 2.0 Bearer Token.
+        if 'access_token' not in token:
+            raise ValueError("Invalid token response")
 
+        auth_manager.save_tokens(token)
+        await update.message.reply_text("✅ 认证成功！现在可以使用/update命令了")
+
+
+    except Exception as e:
+        error_msg = f"❌ 认证失败：{str(e)}"
+        logger.error(f"认证失败详情: {error_msg}", exc_info=True)
+        await update.message.reply_text(error_msg)
+
+
+async def delete_message(context: CallbackContext):
+    await context.bot.delete_message(
+        chat_id=os.getenv("TELEGRAM_CHANNEL_ID"),
+        message_id=context.job.data
+    )
+
+def main():
+    init_db()
+    application = Application.builder().token(os.getenv("TELEGRAM_TOKEN")).build()
+
+
+    if application.job_queue:
+        beijing_tz = timezone(timedelta(hours=8))
+        application.job_queue.run_daily(
+            fetch_and_send_likes,
+            time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=beijing_tz),
+            days=tuple(range(7)),
+        )
+        application.job_queue.run_daily(
+            fetch_and_send_likes,
+            time=datetime.strptime("22:00", "%H:%M").time().replace(tzinfo=beijing_tz),
+            days=tuple(range(7)),
+        )
+
+
+
+
+    application.add_handler(CommandHandler("update", manual_update, filters=filters.ChatType.CHANNEL))
+    application.add_handler(CommandHandler("auth", start_auth))
+    application.add_handler(CommandHandler("callback", handle_callback))
+
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
