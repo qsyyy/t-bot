@@ -1,0 +1,26 @@
+#安装git后需要进行第一次设置。
+git config --global user.name "qsyyy"
+git config --global user.email "xu96078@gmail.com"
+
+
+
+#创建本地项目  ：先进目录，然后
+	git init
+	
+	
+	#创建git库，命名为t-bot
+	
+	#需要注意的是本地创建的分支名称一般是master，但是远程是main所以需要先更改本地分支。
+	git branch -M main #修改本地分支名称
+
+
+	
+	
+	git remote add origin git@github.com:qsyyy/t-bot.git #关联远程仓库
+	
+	git add .  #添加进暂存区
+	
+	git commit -m "Initial commit" #提交更改到本地仓房中。
+	
+	
+	git push -u origin main  #推送代码到main分支上
