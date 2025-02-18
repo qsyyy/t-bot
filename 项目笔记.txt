@@ -2,6 +2,11 @@
 git config --global user.name "qsyyy"
 git config --global user.email "xu96078@gmail.com"
 
+#然后配置ssh
+ssh-keygen -t rsa -b 4096 -C "your_email@example.com" #直接回车3次默认设置即可
+
+#然后去默认保存路径为~/.ssh/id_rsa.pub 复制公钥粘贴到github上。
+
 
 
 #创建本地项目  ：先进目录，然后
@@ -23,4 +28,27 @@ git config --global user.email "xu96078@gmail.com"
 	git commit -m "Initial commit" #提交更改到本地仓房中。
 	
 	
-	git push -u origin main  #推送代码到main分支上
+	git push -u origin main  #d第一次push时使用-u命令绑定到main分支，推送代码到main分支上
+	
+	git push #第二次直接push就行。
+	
+	
+	
+	'项目的第一次push和后面的push使用的命令有什么差别？
+	如何配置git的ssh？
+	
+	bot修改的思路：15分钟一次的cd，
+	
+	需求：
+	需要将bot的功能调整成每日固定时间，
+	或者我直接在tg上输入指令运行bot拉取推特的点赞列表。
+	将点赞列表格式化按推文输出在频道里。
+	需要注意的有怎么保证只有我一个能使用bot？怎么保证每天的点赞不会被漏掉？
+	可以查阅推特api的开发笔记。
+	发送消息的模块可以服用现在的部分。
+	
+	算法设计：
+	
+	优化：
+	要不要优化算法结构？'
+	
