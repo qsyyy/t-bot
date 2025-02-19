@@ -1,39 +1,34 @@
-项目实现了：
 
 -绑定推特账号和telegram的频道。
 -使用免费推特api
--支持手动拉取点赞和自动定时拉取。
--在频道中发送/update 手动触发拉取
+-北京时间6:00和22:00定时执行。
+-在频道或者私聊bot发送/update 手动触发
 -可指定默认拉取的推文数 
 
 
 项目环境需要：
-	# .env
-TELEGRAM_TOKEN=
-TWITTER_BEARER_TOKEN=
-TELEGRAM_CHANNEL_ID=
-TWITTER_CLIENT_ID=
-TWITTER_CLIENT_SECRET=
+#.env 示例
+TELEGRAM_TOKEN="你的Telegram Bot Token"
+TWITTER_CLIENT_ID="你的Twitter Client ID"
+TWITTER_CLIENT_SECRET="你的Twitter Client Secret"
+TELEGRAM_CHANNEL_ID="你的频道ID"
+TWITTER_UID="你的Twitter用户ID"
+
+
 	
 请确保在Twitter开发者门户创建应用时选择OAuth 2.0类型，并正确配置回调地址为
 http://localhost:3000/callback
 
 
-! 重要设置检查清单
-	√ 服务器时区设置为本地时区（影响定时任务执行时间）
-	√ Bot在频道有删除消息权限（需设置为管理员）
-	√ Twitter API权限包含tweet.read和users.read
-	√ 确保网络可访问api.twitter.com
 
 
-初次运行准备步骤：
+初始化：
 
-	pip install -r requirements.txt
+# 生成加密密钥
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 将输出填入.env的ENCRYPTION_KEY
 
-# 创建并初始化数据库
-python -c "import sqlite3; conn = sqlite3.connect('tweets_cache.db'); conn.execute('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)'); conn.execute('CREATE TABLE IF NOT EXISTS processed_tweets (tweet_id TEXT PRIMARY KEY)'); conn.commit()"
-
-# 测试数据库写入权限
-python -c "import sqlite3; conn = sqlite3.connect('tweets_cache.db'); conn.execute('INSERT INTO config (key, value) VALUES (\"test\", \"123\")'); conn.commit()"
+# 安装依赖
+pip install -r requirements.txt
 
 然后：python main.py

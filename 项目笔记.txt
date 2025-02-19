@@ -59,39 +59,45 @@ ssh-keygen -t rsa -b 4096 -C "your_email@example.com" #直接回车3次默认设
 	}
 	
 	
-	项目依赖的问题：依赖写进requirements里，可以一键安装
+
+	
+	
+	
+	项目依赖：依赖写进requirements里，一键安装
 	pip install -r requirements.txt
 	
+	conda环境如果不装在用户目录则可以使用地址直接启动
 	
-	bot修改的思路：15分钟一次的cd，
-	
-	相关信息：免费版推特api，每月限额100次请求。每次请求都有15分钟的冷却时间。
-
-我在修改我的代码，把本来用于telegram频道中接受推特链接并格式化输出推文内容的bot修改成拉取我的推特点赞的推文，并格式化后发送到频道中。这是我整理出来的功能需求。
-
-
-	我需要你帮忙修改代码。而且由于我本身并不会编程，所以如果有需要修改的地方请给出详细的代码位置，并用修改前后的代码互相对照。若需要修改很多代码。请直接输出修改后的完整代码。如果一次输出写不完就结束了，请在下一个回复中直接输出完整代码
-
-	我已经成功的运行项目，但是现在在认证callback的时候卡住了
-
 	
 
-目前的环境：anaconda  python version : 3.12.7
-环境中已经安装的依赖：python-telegram-bot[job-queue]==20.3
-tweepy==4.14.0
-python-dotenv==1.0.0
+	
+	有用的prompt{1.请你扮演资深的python开发者。2。作为资深专家的你编写程序会特别注意实现功能符合需求。3.作为资深专家的你编写程序会十分注意检查代码是否需求，代码的功能完整性。4.作为资深专家的你编写程序会十分注意检查变量、函数、表的定义防止bug出现，提供完整的报错信息和丰富的注释。4.我是向你请教的没有编程知识的好朋友，所以请你将修改后的代码合并到源代码中完整输出。当完整代码太长时请你按模块完整给出修改后的代码。并准确告知要放在哪一段代码的前面或者后面。记住一定要完整！！ }
+	
+我的问题：{我在运行bot进行认证时出现错误。请你根据我提供的推特文档、报错信息分析错误原因，并确认我现在的代码是否符合需求。若我提的需求不合理，请你为我合理化。最后修正bug根据合理需求输出修改后的代码。}
 
+
+相关信息：现在是2025年，自从马克思收购推特后他升级了推特api版本，现在的免费版推特api，每月限额100次请求。每次请求都有15分钟的冷却时间。并且访问GET/2/users/{id}/liked_tweets这种端点需要使用OAuth 2.0 Authorization Code Flow with PKCE来进行授权验证。
+
+
+目前的运行环境：anaconda  python version : 3.12.7
+
+{.env|TELEGRAM_TOKEN="Telegram Bot Token"
+TWITTER_CLIENT_ID="Twitter Client ID"
+TWITTER_CLIENT_SECRET="Twitter Client Secret"
+TELEGRAM_CHANNEL_ID="频道ID"
+TWITTER_UID="Twitter用户ID"
+telegram_admin_USER_ID="382789063"}
 	
 需求：
 
 bot的触发方式：调整成每日固定a.m.6:00和p.m.10:00各运行一次，
-	另设在telegram频道中收到指定命令/updata时触发运行。且在触发运行后将频道中的启动指令那条消息删除。
+	另设在telegram频道中和直接私聊bot使用指定命令/updata触发运行。若/update是在频道中发送的则在运行结束后删除启动指令。需要注意私聊和频道监听的不同之处。
 	
 	
 bot的功能：
-	1.拉取指定用户的点赞列表。数量为100。（目前在测试阶段，暂时设为25）
+	1.使用OAuth 2.0 Authorization Code Flow with PKCE获取的tokens来拉取指定用户的点赞列表。数量为100。（目前在测试阶段，暂时设为25）
 	2.由于liked_tweets端点，返回的推文默认是按用户点赞的时间倒序排列，且不支持查看具体的点赞时间。
-	在数据库字段ast_processed_id中保存拉取的点赞列表最新的推文id，
+	使用某种手段保存拉取的点赞列表最新的推文id，这个保存手段需要保证bot停止运行再启动后仍能读取到。
 	每次运行后拉取的点赞数据与上一次的记录互相比较。找出新增的点赞。然后把此次最新的点赞推文id更新到new_likes_id。
 	
 	3.需要获取的内容有？用户昵称，用户主页url，推文，图片，媒体，gif。
@@ -109,68 +115,153 @@ bot的功能：
 	
 	6.由于推特的免费api的请求数极少。所以给bot的运行也设置冷却时间，防止误启动。每天只允许一次手动运行。保证请求次数不超过一百次/月
 	7.还需要有报错代码。
-	
-	
+	8.通过OAuth 2.0 Authorization Code Flow with PKCE获取tokens，并定时刷新保证授权不失效。该认证方式需要生成授权链接，使用/auth命令完成OAuth认证，用户认证后将完整url发送给bot，bot解析出code，授权完成后清理认证的消息。
+	9.由于该bot运行在我的本地电脑或者手机上。我要求该bot的配置可以在其他电脑或者手机的conda环境里无缝迁移启动。我会使用git来推送和拉取bot主程序，通过其他方式配置.env
+
+
+错误日志：2025-02-20 00:31:31,574 - __main__ - ERROR - 令牌获取失败: (unauthorized_client) Missing valid authorization header
 
 	
+{这是推特api文档关于How to connect to endpoints using OAuth 2.0 Authorization Code Flow with PKCE的说明|Working with confidential clients
+If you are working with confidential clients, you will need to use a basic authentication scheme for generating an authorization header with base64 encoding while making requests to the token endpoints.
+
+The userid and password are separated by a single colon (”:”) character within a base64 encoded string in the credentials.
+
+An example would look like this:
+
+-header 'Authorization: Basic V1ROclFTMTRiVWhwTWw4M2FVNWFkVGQyTldNNk1UcGphUTotUm9LeDN4NThKQThTbTlKSXQyZm1BanEzcTVHWC1icVozdmpKeFNlR3NkbUd0WEViUA=='
+
+If the user agent wishes to send the Client ID “Aladdin” and password “open sesame,” it would use the following header field:
+
+Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==}
 	
-报错日志：
-{
-2025-02-19 04:02:00,334 - __main__ - INFO - 尝试认证参数: client_id=ZzVYc..., client_secret=zwgCw...
-2025-02-19 04:02:00,334 - __main__ - ERROR - 认证失败详情: ❌ 认证失败：'TwitterAuthManager' object has no attribute '_basic_auth'
-Traceback (most recent call last):
-  File "E:\Developer\projects\t-bot\main.py", line 318, in handle_callback
-    "Authorization": f"Basic {auth_manager._basic_auth()}"  # 新增基础认证方法
-AttributeError: 'TwitterAuthManager' object has no attribute '_basic_auth'
-}
+	
+Twitter Likes to Telegram Bot 需求规范
+系统概述
+开发一个可将指定Twitter账号点赞内容自动同步到Telegram频道的机器人，遵守Twitter API v2使用限制，保证每月API调用不超过100次。
 
-#https://github.com/PLhery/node-twitter-api-v2/issues/475
+核心功能
+1. 触发机制
+定时任务：
 
-# 问题在于认证流程不对
-下面是github上面有人提到的解决方式：
-{
-Twitter has basically 3 OAuth methods:
+每日 06:00 UTC 和 22:00 UTC 自动执行
 
-OAuth v1
-OAuth v2 User Context
-OAuth v2 Application Only
-By passing the Bearer token from Twitter's Developer Dashboard you opt-in for the last option. With Application Only flow you basically have access to only public information, if you want to use for example POST endpoints, like the one for creating a tweet, you need to use User Context OAuth.
+间隔16小时，符合15分钟冷却时间要求
 
-That might be helpful
-https://github.com/PLhery/node-twitter-api-v2/blob/master/doc/auth.md#user-wide-authentication-flow
+手动触发：
 
-So in summary:
-You have to somehow obtain an access token.
+私聊：/update 立即执行（每月最多10次）
 
-Use generateOAuth2AuthLink fn to generate an auth url
-const callbackUrl = 'http://127.0.0.1:3001/callback';
-const twitterClient = new TwitterApi({
-	clientId: TWITTER_CREDENTIALS.CLIENT_ID,
-	clientSecret: TWITTER_CREDENTIALS.CLIENT_SECRET,
-});
+频道：/update 触发后自动删除指令消息
 
-const state = randomUUID();
+冷却提示：触发后返回剩余可用次数
 
-const authUrl = this.twitterClient.generateOAuth2AuthLink(
-	callbackUrl,
-	{
-		state,
-		scope: ['tweet.read', 'tweet.write', 'users.read', 'offline.access'],
-	},
+2. 数据获取
+认证流程：
+
+使用OAuth 2.0 PKCE流程
+
+/auth 生成state参数并返回认证链接
+
+回调URL解析需验证state防CSRF攻击
+
+Token自动刷新机制（提前1小时）
+
+3. 数据处理
+增量同步：
+
+使用SQLite存储 last_processed_id
+
+数据对比算法：
+
+new_ids = set(current_tweets) - set(stored_tweets)
+媒体处理：
+
+选择视频的最高比特率版本：
+
+
+
+def select_variant(variants):
+    return max(
+        [v for v in variants if v['content_type'] == 'video/mp4'],
+        key=lambda x: x.get('bit_rate',0)
+    )
+	
+4. 消息构造
+格式规范：
+
+复制
+[媒体组（图片/视频）]
+
+[作者昵称](profile_url)：
+[推文正文]
+
+🔗 [tweet_url](tweet_url)
+发送规则：
+
+单条推文最多4个媒体（使用media_group）
+
+纯文本推文直接发送
+
+
+5. 异常处理
+错误分类：
+
+
+graph TD
+  A[错误类型] --> B[API限额耗尽]
+  A --> C[认证失效]
+  A --> D[网络异常]
+  A --> E[数据解析失败]
+恢复机制：
+
+网络错误：3次指数退避重试
+
+认证错误：发送重新认证指引
+
+存储失败：启用本地缓存文件
+
+非功能需求
+1. 配置管理
+使用.env模板：
+{.env|TELEGRAM_TOKEN="Telegram Bot Token"
+TWITTER_CLIENT_ID="Twitter Client ID"
+TWITTER_CLIENT_SECRET="Twitter Client Secret"
+TELEGRAM_CHANNEL_ID="频道ID"
+TWITTER_UID="Twitter用户ID"
+telegram_admin_USER_ID="382789063"}
+
+
+2. 部署要求
+支持多平台conda部署
+
+依赖管理：依赖写进requirements里，一键安装
+	pip install -r requirements.txt
+
+
+bash
+数据迁移：
+
+直接使用git仓库同步，新仓库只需要手动配置.env
+
+加密存储OAuth token
+
+3. 监控机制
+执行日志格式：
+
+
+状态上报：
+
+报错直接私聊发送给开发者
+
+
+最小持久化数据集：
+
+CREATE TABLE sync_state (
+  id INTEGER PRIMARY KEY,
+  last_tweet_id TEXT,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-const codeVerifier = authUrl.codeVerified;
-Open the generated URL and sign in with twitter.
-Create a callback endpoint, where you can be redirected after a successful auth on Twitter page.
-You should get code & state in query params
-const tokenResult = await this.twitterClient.loginWithOAuth2({
-	code,
-	codeVerifier,
-	redirectUri: callbackUrl,
-});
-Token result will consist of accessToken, refreshToken, expiresIn & scope.
-Save them somewhere and use the accessToken to create a different twitter client.
-const twitterClient = new TwitterApi(accessToken);
 
-const response = await twitterClient.v2.tweet(data.text);
-Create an interceptor that would handle the case when Twitter API throws 401 error and refresh the token using the refreshToken and refreshOAuth2Token method.
-}
+
+
