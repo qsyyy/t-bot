@@ -2,6 +2,13 @@
 # 包含完整的OAuth 2.0认证流程和错误处理
 # 环境要求：Python 3.10+，依赖见文件底部
 
+#{.env|TELEGRAM_TOKEN="Telegram Bot Token"
+#TWITTER_CLIENT_ID="Twitter Client ID"
+#TWITTER_CLIENT_SECRET="Twitter Client Secret"
+#TELEGRAM_CHANNEL_ID="频道ID"
+#TWITTER_UID="Twitter用户ID"
+#telegram_admin_USER_ID="382789063"}
+
 import os
 import re
 import time
@@ -11,6 +18,7 @@ import secrets
 import requests
 import hashlib
 import base64
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
@@ -68,9 +76,9 @@ class TwitterAuthManager:
     def __init__(self):
         self.client_id = os.getenv("TWITTER_CLIENT_ID")
         self.client_secret = os.getenv("TWITTER_CLIENT_SECRET")
-        self.redirect_uri = "http://localhost:3000/callback"  # 本地测试用回调地址
+        self.redirect_uri = os.getenv("CALLBACK_URI")  # 改为从环境变量读取
         self.scope = ["tweet.read", "users.read", "offline.access", "like.read"]
-        self.token_url = "https://api.twitter.com/2/oauth2/token"
+        self.token_url = "https://api.x.com/2/oauth2/token"
 
     def _basic_auth(self):
         """生成Basic认证头（用于令牌刷新）"""
@@ -86,24 +94,27 @@ class TwitterAuthManager:
         )
 
     def generate_auth_url(self):
-        """生成Twitter认证链接（使用PKCE流程）"""
+    #"""生成Twitter认证链接（添加redirect_uri验证）"""
+        if not self.redirect_uri.startswith(("http://", "https://")):
+            raise ValueError("redirect_uri必须使用HTTP/HTTPS协议")
+
         oauth = self.get_oauth_session()
         code_verifier = secrets.token_urlsafe(50)  # 生成随机验证码
         code_challenge = self.get_code_challenge(code_verifier)
         auth_url = oauth.authorization_url(
-            "https://twitter.com/i/oauth2/authorize",
+            "https://x.com/i/oauth2/authorize",
             code_challenge=code_challenge,
             code_challenge_method="S256"
         )
         return auth_url[0], code_verifier
 
     def get_code_challenge(self, code_verifier):
-        """生成PKCE code challenge"""
+        #"""生成PKCE code challenge"""
         sha256_hash = hashlib.sha256(code_verifier.encode()).digest()
         return base64.urlsafe_b64encode(sha256_hash).decode().replace('=', '')
 
     def save_tokens(self, token):
-        """保存令牌到数据库"""
+        #"""保存令牌到数据库"""
         cursor = conn.cursor()
         cursor.execute('''INSERT OR REPLACE INTO twitter_auth 
             (user_id, access_token, refresh_token, expires_at)
@@ -116,7 +127,7 @@ class TwitterAuthManager:
         conn.commit()
 
     def get_valid_client(self):
-        """获取有效API客户端（自动处理令牌刷新）"""
+        #"""获取有效API客户端（自动处理令牌刷新）"""
         cursor = conn.cursor()
         cursor.execute('SELECT access_token, refresh_token, expires_at FROM twitter_auth')
         row = cursor.fetchone()
@@ -162,18 +173,18 @@ class TwitterAuthManager:
 # --------------------------
 
 async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理/auth命令 - 启动OAuth认证流程"""
+    #"""处理/auth命令 - 启动OAuth认证流程"""
     try:
         # 生成认证链接和验证码
         auth_url, code_verifier = auth_manager.generate_auth_url()
-        
+
         # 保存验证码到数据库
         cursor = conn.cursor()
         cursor.execute('''INSERT OR REPLACE INTO config 
             (key, value) VALUES (?, ?)''',
             ('code_verifier', code_verifier))
         conn.commit()
-        
+
         # 发送认证链接给用户（添加使用说明）
         await update.message.reply_text(
             f"请访问以下链接进行认证：\n{auth_url}\n\n"
@@ -188,64 +199,85 @@ async def start_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ 认证初始化失败：{str(e)}")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理回调URL - 完成OAuth认证流程（关键更新）"""
+    #"""处理回调URL - 完成OAuth认证流程（关键更新）"""
     try:
         callback_url = update.message.text
-        
-        # 验证URL有效性
-        if "code=" not in callback_url:
-            await update.message.reply_text("⚠️ 无效的回调URL，请确认包含code参数")
+
+        # URL格式验证
+        if not re.match(r'^https?://[^\s]+code=[A-Za-z0-9_-]+', callback_url):
+            await update.message.reply_text("⚠️ 无效的回调URL格式")
+            return
+
+        # 解析URL参数
+        parsed_url = urlparse(callback_url)
+        query_params = parse_qs(parsed_url.query)
+        code = query_params.get('code', [''])[0]
+
+        if not code:
+            await update.message.reply_text("⚠️ 无法提取授权码")
             return
 
         # 从数据库获取code_verifier
         cursor = conn.cursor()
         cursor.execute('SELECT value FROM config WHERE key = "code_verifier"')
         result = cursor.fetchone()
-        
+
         if not result:
-            await update.message.reply_text("❌ 未找到认证会话，请重新执行/auth命令")
-            return
-            
-        code_verifier = result[0]
-        
-        # 提取授权码
-        try:
-            code = callback_url.split('code=')[1].split('&')[0]
-        except IndexError:
-            await update.message.reply_text("⚠️ URL格式错误，请确认包含完整的code参数")
+            await update.message.reply_text("❌ 认证会话已过期")
             return
 
-        # 获取访问令牌
+        code_verifier = result[0]
+
+        # 获取访问令牌（符合Confidential Client规范）
         try:
             token = auth_manager.get_oauth_session().fetch_token(
                 auth_manager.token_url,
                 code=code,
                 code_verifier=code_verifier,
                 client_secret=auth_manager.client_secret,
+                client_id=auth_manager.client_id,
                 include_client_id=True,
-                timeout=10  # 添加超时设置
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": f"Basic {auth_manager._basic_auth()}"
+                },
+                timeout=10
             )
         except Exception as e:
             logger.error(f"令牌获取失败: {str(e)}")
-            await update.message.reply_text(f"❌ 令牌获取失败：{str(e)}")
+            await update.message.reply_text(f"❌ 认证失败：{str(e)}")
             return
-        
+
         # 保存令牌到数据库
         auth_manager.save_tokens(token)
-        
-        # 获取并保存用户ID（兼容未设置TWITTER_UID的情况）
+
+        # 使用OAuth2.0认证获取用户信息
         global TWITTER_UID
         if not TWITTER_UID:
-            client = tweepy.Client(token['access_token'])
-            user_info = client.get_me()
-            TWITTER_UID = user_info.data.id
-            logger.info(f"自动获取用户ID: {TWITTER_UID}")
-        
+            try:
+                client = tweepy.Client(
+                    bearer_token=token['access_token'],
+                    wait_on_rate_limit=True
+                )
+                user_info = client.get_me(user_auth=False)  # 禁用用户认证流程
+
+                if user_info and user_info.data:
+                    TWITTER_UID = user_info.data.id
+                    logger.info(f"用户ID自动获取成功: {TWITTER_UID}")
+                else:
+                    raise ValueError("无法获取有效用户信息")
+
+            except Exception as e:
+                logger.error(f"用户信息获取失败: {str(e)}")
+                await update.message.reply_text("❌ 无法自动获取用户ID，请手动配置TWITTER_UID")
+                return
+
         await update.message.reply_text("✅ 认证成功！机器人已就绪")
 
     except Exception as e:
         logger.error(f"回调处理失败: {str(e)}", exc_info=True)
         await update.message.reply_text(f"❌ 认证失败：{str(e)}")
+
 
 # --------------------------
 # 核心功能部分（优化更新）
@@ -276,10 +308,10 @@ class EnhancedRateLimiter:
         self.lock = False  # 防止并发请求
 
     def wait(self):
-        """等待冷却时间（线程安全）"""
+        #"""等待冷却时间（线程安全）"""
         while self.lock:
             time.sleep(0.1)
-            
+
         self.lock = True
         try:
             if self.last_call and (time.time() - self.last_call < self.interval):
@@ -291,7 +323,7 @@ class EnhancedRateLimiter:
             self.lock = False
 
     def can_manual_run(self):
-        """检查手动触发是否可用"""
+        #"""检查手动触发是否可用"""
         if not self.last_manual_run:
             return True
         elapsed = (datetime.now() - self.last_manual_run).total_seconds()
@@ -300,7 +332,7 @@ class EnhancedRateLimiter:
 limiter = EnhancedRateLimiter()
 
 async def fetch_and_send_likes(context: ContextTypes.DEFAULT_TYPE):
-    """主业务逻辑：获取并发送点赞推文（关键更新）"""
+    #"""主业务逻辑：获取并发送点赞推文（关键更新）"""
     try:
         limiter.wait()
         client = auth_manager.get_valid_client()
@@ -545,7 +577,7 @@ def main():
     # 更新处理器配置（关键修改）
     application.add_handler(CommandHandler("update", manual_update, filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("auth", start_auth, filters.ChatType.PRIVATE))
-    
+
     # 使用MessageHandler代替原来的CommandHandler处理回调URL
     application.add_handler(MessageHandler(
         filters.TEXT & (~filters.COMMAND) & filters.ChatType.PRIVATE,
@@ -554,7 +586,7 @@ def main():
 
     # 添加错误处理
     application.add_error_handler(error_handler)
-    
+
     logger.info("机器人启动成功")
     application.run_polling()
 

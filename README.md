@@ -24,9 +24,6 @@ http://localhost:3000/callback
 
 初始化：
 
-# 生成加密密钥
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# 将输出填入.env的ENCRYPTION_KEY
 
 # 安装依赖
 pip install -r requirements.txt
