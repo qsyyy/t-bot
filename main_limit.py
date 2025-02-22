@@ -141,7 +141,7 @@ class TwitterAuthManager:
             VALUES (?, ?, ?, ?)''',
             (TWITTER_UID, 
              token['access_token'],
-             token['refresh_token'],
+             token.get('refresh_token', ''),  # 确保兼容无返回的情况
              int(time.time()) + token.get('expires_in', 7200))  # 默认2小时有效期
         )
         conn.commit()
@@ -168,18 +168,34 @@ class TwitterAuthManager:
                     },
                     data={
                         "grant_type": "refresh_token",
-                        "refresh_token": refresh_token
+                        "refresh_token": refresh_token,
+                        "client_id": self.client_id  # 新增必要参数
                     },
                     timeout=10  # 添加超时设置
                 )
                 response.raise_for_status()  # 检查HTTP错误
                 token = response.json()
+
+                # 增加调试日志
+                logger.info(f"令牌刷新响应: {token}")
+
+                # 确保获取新refresh_token（重要！）
+                if 'refresh_token' not in token:
+                    token['refresh_token'] = refresh_token  # 如果API不返回则保留原值
+
+            except requests.exceptions.HTTPError as e:
+                # 详细记录错误信息
+                error_detail = f"HTTP错误 {e.response.status_code}: {e.response.text}"
+                logger.error(f"令牌刷新失败 - {error_detail}")
+                raise Exception(f"令牌刷新失败: {error_detail}")
             except Exception as e:
-                raise Exception(f"令牌刷新失败: {str(e)}")
+                logger.error(f"请求异常: {str(e)}", exc_info=True)
+                raise Exception(f"令牌刷新请求失败: {str(e)}")
 
             if 'error' in token:
                 raise Exception(f"令牌刷新失败: {token['error']}")
 
+            # 确保保存新refresh_token
             self.save_tokens(token)
             access_token = token['access_token']
 
@@ -308,6 +324,10 @@ auth_manager = TwitterAuthManager()
 init_db()
 
 # 增强日志配置
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -323,8 +343,6 @@ class EnhancedRateLimiter:
     def __init__(self):
         self.last_call = None
         self.interval = 900  # 15分钟冷却时间
-        self.daily_limit = 1
-        self.last_manual_run = None
         self.lock = False  # 防止并发请求
 
     def wait(self):
@@ -342,12 +360,6 @@ class EnhancedRateLimiter:
         finally:
             self.lock = False
 
-    def can_manual_run(self):
-        #"""检查手动触发是否可用"""
-        if not self.last_manual_run:
-            return True
-        elapsed = (datetime.now() - self.last_manual_run).total_seconds()
-        return elapsed >= 86400  # 24小时限制
 
 limiter = EnhancedRateLimiter()
 
@@ -369,7 +381,7 @@ async def fetch_and_send_likes(context: ContextTypes.DEFAULT_TYPE):
             try:
                 response = client.get_liked_tweets(
                     TWITTER_UID,
-                    max_results=22,
+                    max_results=7,
                     expansions=["author_id", "attachments.media_keys"],
                     tweet_fields=["created_at", "text"],
                     user_fields=["name", "username"],
@@ -553,21 +565,12 @@ async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = update.effective_message
-    if not limiter.can_manual_run():
-        msg = await context.bot.send_message(
-            chat_id=message.chat.id,
-            text="⚠️ 24小时内只能手动触发一次"
-        )
-        context.job_queue.run_once(delete_message, 10, data=msg.message_id)
-        return
-
     try:
         await context.bot.delete_message(
             chat_id=message.chat.id,
             message_id=message.message_id
         )
 
-        limiter.last_manual_run = datetime.now()
         await fetch_and_send_likes(context)
     except Exception as e:
         logger.error(f"手动触发失败: {str(e)}")
@@ -621,9 +624,21 @@ def main():
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """全局错误处理"""
-    logger.error(f"全局异常: {context.error}", exc_info=True)
+    error_msg = str(context.error)
+
+    # 记录详细错误信息
+    logger.error(f"全局异常: {error_msg}", exc_info=True)
+
+    # 针对认证错误的特殊处理
+    if "invalid_grant" in error_msg:
+        error_msg += "\n⚠️ 可能原因：refresh_token已失效，请重新进行认证流程 /auth"
+
     if update.effective_message:
-        await update.effective_message.reply_text(f"⚠️ 系统错误: {str(context.error)}")
+        await update.effective_message.reply_text(
+            f"⚠️ 系统错误: {escape_markdown(error_msg, version=2)}"
+        )
 
 if __name__ == "__main__":
     main()
+
+

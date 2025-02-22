@@ -83,3 +83,6 @@ https://scrapfly.io/blog/how-to-scrape-twitter/
 工具选择：
 
 Playwright（推荐）：比Selenium更轻量，支持无头浏览器
+
+
+存在令牌刷新问题。令牌过期后刷新会失败。
