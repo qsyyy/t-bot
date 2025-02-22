@@ -103,7 +103,18 @@ class TwitterAuthManager:
     def _basic_auth(self):
         """生成Basic认证头（用于令牌刷新）"""
         creds = f"{self.client_id}:{self.client_secret}"
-        return base64.b64encode(creds.encode()).decode()
+        encoded = base64.b64encode(creds.encode()).decode()
+        # ↓↓↓ 新增调试日志 ↓↓↓
+        logger.debug(
+            f"Basic认证生成详情：\n"
+            f"- Client ID: {self.client_id[:5]}... (长度:{len(self.client_id)})\n"
+            f"- Client Secret: {self.client_secret[:5]}... (长度:{len(self.client_secret)})\n"
+            f"- 组合字符串: {creds[:20]}...\n"
+            f"- Base64结果: {encoded[:30]}..."
+        )
+        return encoded
+
+
 
     def get_oauth_session(self):
         """创建OAuth2会话对象"""
@@ -169,7 +180,6 @@ class TwitterAuthManager:
                     data={
                         "grant_type": "refresh_token",
                         "refresh_token": refresh_token,
-                        "client_id": self.client_id  # 新增必要参数
                     },
                     timeout=10  # 添加超时设置
                 )
@@ -186,7 +196,12 @@ class TwitterAuthManager:
             except requests.exceptions.HTTPError as e:
                 # 详细记录错误信息
                 error_detail = f"HTTP错误 {e.response.status_code}: {e.response.text}"
-                logger.error(f"令牌刷新失败 - {error_detail}")
+                logger.error("‼️ 令牌刷新失败详情 ‼️")
+                logger.error(f"请求URL: {e.response.url}")
+                logger.error(f"请求头: {dict(e.response.request.headers)}")
+                logger.error(f"请求体: {e.response.request.body.decode('utf-8')}")  # 显示实际发送的数据
+                logger.error(f"响应头: {dict(e.response.headers)}")
+                logger.error(f"响应内容: {e.response.text}")
                 raise Exception(f"令牌刷新失败: {error_detail}")
             except Exception as e:
                 logger.error(f"请求异常: {str(e)}", exc_info=True)
