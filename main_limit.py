@@ -202,6 +202,11 @@ class TwitterAuthManager:
                 logger.error(f"请求体: {e.response.request.body.decode('utf-8')}")  # 显示实际发送的数据
                 logger.error(f"响应头: {dict(e.response.headers)}")
                 logger.error(f"响应内容: {e.response.text}")
+                logger.debug(
+                    f"环境验证：\n"
+                    f"- CLIENT_ID存在：{bool(self.client_id)}\n"
+                    f"- CLIENT_SECRET存在：{bool(self.client_secret)}\n"
+                            )
                 raise Exception(f"令牌刷新失败: {error_detail}")
             except Exception as e:
                 logger.error(f"请求异常: {str(e)}", exc_info=True)
@@ -396,7 +401,7 @@ async def fetch_and_send_likes(context: ContextTypes.DEFAULT_TYPE):
             try:
                 response = client.get_liked_tweets(
                     TWITTER_UID,
-                    max_results=7,
+                    max_results=23,
                     expansions=["author_id", "attachments.media_keys"],
                     tweet_fields=["created_at", "text"],
                     user_fields=["name", "username"],
